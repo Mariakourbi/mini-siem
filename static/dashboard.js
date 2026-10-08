@@ -82,22 +82,26 @@ async function fetchDashboardData() {
             });
         }
 
-        // Logs Feed Table με Flags
+      
+        // Logs Feed Table με Flags & VPN Detection
         const tableBody = document.getElementById("logs-table-body");
         tableBody.innerHTML = "";
         data.recent_logs.forEach(log => {
+            const vpnTag = log.is_vpn 
+                ? ` <span style="background: #bd561d; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">🛡️ VPN/PROXY</span>` 
+                : '';
+
             const row = document.createElement("tr");
             row.innerHTML = `
                 <td>${log.timestamp}</td>
                 <td>${log.flag} ${log.country}</td>
-                <td><code>${log.ip}</code></td>
+                <td><code>${log.ip}</code>${vpnTag}</td>
                 <td><strong>${log.method}</strong></td>
                 <td>${log.endpoint}</td>
                 <td><span class="badge badge-${log.status}">${log.status}</span></td>
             `;
             tableBody.appendChild(row);
         });
-
         // Charts
         updateCharts(data.status_distribution, data.top_ips);
 

@@ -1,172 +1,227 @@
-from flask import Flask, render_template, jsonify, request
 import os
+import json
+import urllib.request
 from datetime import datetime
-from collections import Counter
+from flask import Flask, request, jsonify, render_template
 
 app = Flask(__name__)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_FILE = os.path.join(BASE_DIR, "server_logs.txt")
-BLOCKED_FILE = os.path.join(BASE_DIR, "blocked_ips.txt")
+LOG_FILE = "server_logs.txt"
+BLOCKED_IPS_FILE = "blocked_ips.txt"
 
-GEO_DB = {
-    "127.0.0.1": {"country": "Localhost Admin", "code": "LOC", "flag": "💻"},
-    "192.168.1.15": {"country": "Local LAN", "code": "GR", "flag": "🇬🇷"}
-}
+# Προσωρινή μνήμη (Cache) για να μην καλούμε το API πολλές φορές για την ίδια IP
+IP_CACHE = {}
 
-def lookup_ip(ip):
-    return GEO_DB.get(ip, {"country": "Internal Network", "code": "NET", "flag": "🌐"})
+def get_client_ip():
+    """Εντοπίζει την πραγματική IP ακόμα και πίσω από Proxies/Cloud/ngrok."""
+    if request.headers.get('X-Forwarded-For'):
+        # Το πρώτο στοιχείο στη λίστα είναι η αρχική IP του πελάτη
+        return request.headers.get('X-Forwarded-For').split(',')[0].strip()
+    return request.remote_addr
 
 def get_blocked_ips():
-    if not os.path.exists(BLOCKED_FILE):
-        return []
-    with open(BLOCKED_FILE, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+    if not os.path.exists(BLOCKED_IPS_FILE):
+        return set()
+    with open(BLOCKED_IPS_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
 
-def write_blocked_ips(ip_list):
-    with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
-        for ip in ip_list:
+def add_blocked_ip(ip):
+    blocked = get_blocked_ips()
+    if ip not in blocked:
+        with open(BLOCKED_IPS_FILE, "a", encoding="utf-8") as f:
             f.write(f"{ip}\n")
 
-def parse_logs():
-    records = []
-    if not os.path.exists(LOG_FILE):
-        return records
+def remove_blocked_ip(ip):
+    blocked = get_blocked_ips()
+    if ip in blocked:
+        blocked.remove(ip)
+        with open(BLOCKED_IPS_FILE, "w", encoding="utf-8") as f:
+            for item in blocked:
+                f.write(f"{item}\n")
 
-    with open(LOG_FILE, "r", encoding="utf-8") as file:
-        for line in file:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) == 5:
-                ip = parts[1].strip()
-                geo = lookup_ip(ip)
-                records.append({
-                    "timestamp": parts[0].strip(),
-                    "ip": ip,
-                    "method": parts[2].strip(),
-                    "endpoint": parts[3].strip(),
-                    "status": parts[4].strip(),
-                    "country": geo["country"],
-                    "flag": geo["flag"]
-                })
-    return records
+def lookup_ip(ip):
+    """Ελέγχει αν η IP είναι τοπική ή εξωτερική και αν ανήκει σε VPN/Proxy/Datacenter."""
+    if ip in ["127.0.0.1", "localhost"] or ip.startswith("192.168.") or ip.startswith("10."):
+        return {
+            "country": "Localhost Admin",
+            "code": "LOC",
+            "flag": "💻",
+            "is_vpn": False,
+            "org": "Internal Network"
+        }
 
-# Καταγραφή πραγματικής κίνησης
-@app.after_request
-def log_request_traffic(response):
-    # Εξαιρούμε τα εσωτερικά endpoints του ίδιου του dashboard
-    if request.path.startswith("/api/data") or request.path.startswith("/static"):
-        return response
+    if ip in IP_CACHE:
+        return IP_CACHE[ip]
 
-    client_ip = request.remote_addr
-    method = request.method
-    endpoint = request.path
-    status = response.status_code
+    try:
+        # IP Intelligence query
+        url = f"http://ip-api.com/json/{ip}?fields=status,country,countryCode,proxy,hosting,org"
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mini-SIEM-Scanner'})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get("status") == "success":
+                # Θεωρείται VPN αν είναι flagged ως proxy ή ανήκει σε data center / hosting provider
+                is_vpn = bool(data.get("proxy", False) or data.get("hosting", False))
+                result = {
+                    "country": data.get("country", "Unknown"),
+                    "code": data.get("countryCode", "UN"),
+                    "flag": "🛡️" if is_vpn else "🌐",
+                    "is_vpn": is_vpn,
+                    "org": data.get("org", "Unknown ISP")
+                }
+                IP_CACHE[ip] = result
+                return result
+    except Exception as e:
+        print(f"[!] Intelligence lookup failed for {ip}: {e}")
+
+    fallback = {"country": "External IP", "code": "EXT", "flag": "🌐", "is_vpn": False, "org": "N/A"}
+    IP_CACHE[ip] = fallback
+    return fallback
+
+def log_event(status_code):
+    """Αποθηκεύει το HTTP αίτημα στο αρχείο καταγραφής."""
+    client_ip = get_client_ip()
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    entry = f"{timestamp} | {client_ip} | {method} | {endpoint} | {status}\n"
+    entry = f"{timestamp} | {client_ip} | {request.method} {request.path} | {status_code}\n"
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(entry)
-        f.flush()
 
-    return response
+# --- Host Firewall Middleware ---
+@app.before_request
+def firewall_check():
+    client_ip = get_client_ip()
+    blocked = get_blocked_ips()
+    # Επιτρέπουμε τη διαχείριση του firewall ακόμα και αν γίνει block
+    if client_ip in blocked and not request.path.startswith('/api/unblock'):
+        log_event(403)
+        return "<h1>403 Forbidden</h1><p>Your IP has been permanently blocked by Host WAF.</p>", 403
 
-# --- Endpoints για έλεγχο ασφαλείας ---
-@app.route("/")
-def index():
-    return render_template("index.html")
+# --- Front End & Routes ---
+@app.route('/')
+def dashboard():
+    log_event(200)
+    return render_template('index.html')
 
-@app.route("/login", methods=["GET", "POST"])
-def mock_login():
-    if request.method == "POST":
-        u = request.form.get("user")
-        p = request.form.get("pass")
-        if u == "admin" and p == "secret":
-            return "<h3>✅ Success Logon!</h3>"
-        return "<h3>❌ 401 Unauthorized</h3>", 401
-    return '<form method="post">User: <input name="user"> Pass: <input name="pass" type="password"><button>Login</button></form>'
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        # Προσομοίωση: όλοι οι κωδικοί αποτυγχάνουν για να δοκιμάζουμε Brute Force
+        log_event(401)
+        return "<h1>401 Unauthorized</h1><p>Invalid credentials.</p>", 401
+    log_event(200)
+    return '''
+        <h2>Protected Login Portal</h2>
+        <form method="POST">
+            Username: <input type="text" name="user"><br><br>
+            Password: <input type="password" name="pass"><br><br>
+            <input type="submit" value="Sign In">
+        </form>
+    '''
 
-@app.route("/admin")
-@app.route("/.env")
-@app.route("/wp-login.php")
-def mock_forbidden():
-    return "<h3>🚫 403 Forbidden: Scanning Detected</h3>", 403
+@app.route('/admin')
+@app.route('/.env')
+@app.route('/wp-login.php')
+def sensitive_routes():
+    log_event(403)
+    return "<h1>403 Forbidden</h1><p>Access Denied to restricted administrative resources.</p>", 403
 
-# --- SIEM REST APIs ---
-@app.route("/api/data")
+# --- API Endpoints για το SOC Dashboard ---
+@app.route('/api/data')
 def api_data():
-    logs = parse_logs()
+    if not os.path.exists(LOG_FILE):
+        return jsonify({"logs": [], "stats": {}, "alerts": []})
+
+    with open(LOG_FILE, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+
+    logs = []
+    status_counts = {}
+    ip_counts = {}
+    login_fails = {}
+    scan_attempts = {}
     blocked_ips = get_blocked_ips()
 
-    total_events = len(logs)
-    unique_ips = len(set(log["ip"] for log in logs))
+    # Διαβάζουμε τα τελευταία 150 συμβάντα
+    for line in reversed(lines[-150:]):
+        parts = [p.strip() for p in line.split('|')]
+        if len(parts) == 4:
+            ts, ip, req_path, code = parts
+            geo = lookup_ip(ip)
 
-    ip_counter = Counter(log["ip"] for log in logs)
-    status_counter = Counter(log["status"] for log in logs)
+            logs.append({
+                "time": ts,
+                "ip": ip,
+                "request": req_path,
+                "status": code,
+                "geo": f"{geo['flag']} {geo['country']}",
+                "is_vpn": geo.get("is_vpn", False),
+                "isp": geo.get("org", ""),
+                "is_blocked": ip in blocked_ips
+            })
+
+            status_counts[code] = status_counts.get(code, 0) + 1
+            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+
+            if "/login" in req_path and code == "401":
+                login_fails[ip] = login_fails.get(ip, 0) + 1
+            if code == "403" and any(r in req_path for r in ['/admin', '/.env', '/wp-login.php']):
+                scan_attempts[ip] = scan_attempts.get(ip, 0) + 1
 
     alerts = []
-    failed_logins = Counter(
-        log["ip"] for log in logs if log["endpoint"] == "/login" and log["status"] == "401"
-    )
-    for ip, count in failed_logins.items():
-        if count >= 3 and ip not in blocked_ips:
-            geo = lookup_ip(ip)
+    # 1. Alert: Brute Force
+    for ip, count in login_fails.items():
+        if count >= 3:
             alerts.append({
                 "type": "danger",
                 "ip": ip,
-                "geo": f"{geo['flag']} {geo['country']}",
-                "msg": f"Brute-Force επίθεση στο /login ({count} αποτυχίες)"
+                "msg": f"🚨 Brute-Force Alert: {count} αποτυχημένες προσπάθειες εισόδου!"
             })
 
-    recon_ips = Counter(
-        log["ip"] for log in logs if log["status"] == "403"
-    )
-    for ip, count in recon_ips.items():
-        if count >= 2 and ip not in blocked_ips:
-            geo = lookup_ip(ip)
+    # 2. Alert: Reconnaissance / Scanning
+    for ip, count in scan_attempts.items():
+        if count >= 2:
             alerts.append({
                 "type": "warning",
                 "ip": ip,
-                "geo": f"{geo['flag']} {geo['country']}",
-                "msg": f"Directory Reconnaissance Scanning ({count} 403s)"
+                "msg": f"⚠️ Reconnaissance Alert: Ανιχνεύθηκε σάρωση ευπαθειών ({count} restricted paths)!"
             })
 
-    blocked_details = [{"ip": ip, "geo": f"{lookup_ip(ip)['flag']} {lookup_ip(ip)['country']}"} for ip in blocked_ips]
+    # 3. Alert: VPN / Proxy Traffic
+    checked_vpn_ips = set()
+    for entry in logs:
+        ip = entry["ip"]
+        if entry["is_vpn"] and ip not in checked_vpn_ips:
+            checked_vpn_ips.add(ip)
+            alerts.append({
+                "type": "info",
+                "ip": ip,
+                "msg": f"🛡️ VPN/Proxy Detected: Κυκλοφορία μέσω ανώνυμου δικτύου ({entry['isp']})"
+            })
 
     return jsonify({
-        "total_events": total_events,
-        "unique_ips": unique_ips,
-        "blocked_ips_count": len(blocked_ips),
-        "blocked_ips": blocked_details,
-        "status_distribution": dict(status_counter),
-        "top_ips": dict(ip_counter.most_common(5)),
-        "alerts": alerts,
-        "recent_logs": logs[-15:][::-1]
+        "logs": logs,
+        "stats": {
+            "status_counts": status_counts,
+            "top_ips": sorted(ip_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        },
+        "alerts": alerts
     })
 
-@app.route("/api/block", methods=["POST"])
-def block_ip():
-    data = request.get_json()
-    ip_to_block = data.get("ip")
-    if ip_to_block:
-        blocked = get_blocked_ips()
-        if ip_to_block not in blocked:
-            blocked.append(ip_to_block)
-            write_blocked_ips(blocked)
-        return jsonify({"status": "success"})
-    return jsonify({"status": "error"}), 400
+@app.route('/api/block', methods=['POST'])
+def api_block():
+    ip = request.json.get('ip')
+    if ip:
+        add_blocked_ip(ip)
+        return jsonify({"success": True})
+    return jsonify({"success": False}), 400
 
-@app.route("/api/unblock", methods=["POST"])
-def unblock_ip():
-    data = request.get_json()
-    ip_to_unblock = data.get("ip")
-    if ip_to_unblock:
-        blocked = [ip for ip in get_blocked_ips() if ip != ip_to_unblock]
-        write_blocked_ips(blocked)
-        return jsonify({"status": "success"})
-    return jsonify({"status": "error"}), 400
+@app.route('/api/unblock', methods=['POST'])
+def api_unblock():
+    ip = request.json.get('ip')
+    if ip:
+        remove_blocked_ip(ip)
+        return jsonify({"success": True})
+    return jsonify({"success": False}), 400
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
