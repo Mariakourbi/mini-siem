@@ -90,6 +90,8 @@ def log_event(status_code):
 @app.before_request
 def firewall_check():
     client_ip = get_client_ip()
+    if client_ip in ["127.0.0.1", "localhost"]:
+        return None
     blocked = get_blocked_ips()
     # Επιτρέπουμε τη διαχείριση του firewall ακόμα και αν γίνει block
     if client_ip in blocked and not request.path.startswith('/api/unblock'):
