@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOC Cyber Defense & SIEM Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="sidebar">
+        <div class="logo">
+            <h2>🛡️ Mini-SIEM</h2>
+            <span>SOC Defense Platform</span>
+        </div>
+        <ul class="nav-links">
+            <li class="active" onclick="switchTab('live-monitor', this)"><a href="javascript:void(0)">📊 Live Monitor</a></li>
+            <li onclick="switchTab('incident-alerts', this)"><a href="javascript:void(0)">🚨 Incident Alerts</a></li>
+            <li onclick="switchTab('firewall-rules', this)"><a href="javascript:void(0)">🚫 Blocked IPs</a></li>
+            <li onclick="switchTab('log-explorer', this)"><a href="javascript:void(0)">📜 Live Logs</a></li>
+        </ul>
+        <div class="status-indicator">
+            <span class="dot pulse"></span> Streaming Active
+        </div>
+    </div>
+
+    <div class="main-content">
+        <header class="topbar">
+            <h1 id="tab-title">Real-Time Security Event Monitoring</h1>
+            <span id="last-update" class="timestamp">Ενημέρωση: --:--:--</span>
+        </header>
+
+        <!-- KPI Metrics (Πάντα ορατά στην κορυφή) -->
+        <div class="metrics-grid">
+            <div class="card metric-card">
+                <h3>ΣΥΝΟΛΙΚΑ EVENTS</h3>
+                <p id="total-events" class="metric-value">0</p>
+            </div>
+            <div class="card metric-card">
+                <h3>ΜΟΝΑΔΙΚΕΣ IPs</h3>
+                <p id="unique-ips" class="metric-value">0</p>
+            </div>
+            <div class="card metric-card danger">
+                <h3>ΕΝΕΡΓΑ ALERTS</h3>
+                <p id="active-alerts-count" class="metric-value">0</p>
+            </div>
+            <div class="card metric-card warning">
+                <h3>BLOCKED IPs (FIREWALL)</h3>
+                <p id="blocked-count" class="metric-value">0</p>
+            </div>
+        </div>
+
+        <!-- TAB 1: LIVE MONITOR -->
+        <div id="tab-live-monitor" class="tab-pane active">
+            <div class="charts-grid">
+                <div class="card chart-card">
+                    <h3>📌 Κατανομή HTTP Status Codes</h3>
+                    <canvas id="statusChart"></canvas>
+                </div>
+                <div class="card chart-card">
+                    <h3>📊 Top 5 Πιο Δραστήριες IPs</h3>
+                    <canvas id="ipChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- TAB 2: INCIDENT ALERTS -->
+        <div id="tab-incident-alerts" class="tab-pane">
+            <section class="card section-card">
+                <h2>🚨 Ενεργές Απειλές & Αντιμετώπιση (Threat Response)</h2>
+                <div id="alerts-container" class="alerts-list"></div>
+            </section>
+        </div>
+
+        <!-- TAB 3: FIREWALL RULES / BLOCKED IPs -->
+        <div id="tab-firewall-rules" class="tab-pane">
+            <section class="card section-card">
+                <h2>🚫 Firewall Rule Management (Αποκλεισμένες IPs)</h2>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Blocked IP</th>
+                                <th>Country / Zone</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="blocked-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+
+        <!-- TAB 4: LIVE LOGS -->
+        <div id="tab-log-explorer" class="tab-pane">
+            <section class="card section-card">
+                <h2>📜 Τελευταία Συμβάντα Δικτύου (Live Feed)</h2>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Origin</th>
+                                <th>Source IP</th>
+                                <th>Method</th>
+                                <th>Endpoint</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logs-table-body"></tbody>
+                    </table>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='dashboard.js') }}"></script>
+</body>
+</html>

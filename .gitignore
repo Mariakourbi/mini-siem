@@ -1,0 +1,7 @@
+dist/
+build/
+*.spec
+__pycache__/
+server_logs.txt
+blocked_ips.txt
+*.zip
